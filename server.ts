@@ -1,42 +1,32 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
-import { DEFAULT_ITEM_DICTIONARY } from './src/data/defaultItems';
-import { MarketPriceData, IngestPricePayload } from './src/types';
+import { MarketItem, IngestPricePayload, ServerStats, PacketLogEntry, ItemCategoryType } from './src/types';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+const CAPTURED_FILE_PATH = path.join(process.cwd(), 'precios_capturados.json');
 
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-// In-memory Database Store
 interface ServerStore {
-  items: Map<number, MarketPriceData>;
-  dictionary: Record<number, { id: number; name: string; category: string; level?: number }>;
+  items: Map<number, MarketItem>;
   stats: {
     totalPacketsReceived: number;
     totalIngests: number;
     lastIngestTime: string | null;
     serverStartTime: number;
   };
-  packetLogs: Array<{
-    id: string;
-    timestamp: string;
-    source: string;
-    itemsCount: number;
-    summary: string;
-    rawPayload?: unknown;
-  }>;
+  packetLogs: PacketLogEntry[];
 }
 
 const store: ServerStore = {
   items: new Map(),
-  dictionary: { ...DEFAULT_ITEM_DICTIONARY },
   stats: {
     totalPacketsReceived: 0,
     totalIngests: 0,
@@ -46,317 +36,72 @@ const store: ServerStore = {
   packetLogs: []
 };
 
-// Seed some initial realistic market items so the app looks alive on first open
-function seedInitialMarket() {
-  const seeds: Array<{ id: number; p1: number; p10: number; p100: number; server: string }> = [
-    { id: 254, p1: 150, p10: 1400, p100: 13500, server: "Tal Kasha" },
-    { id: 255, p1: 320, p10: 3100, p100: 29000, server: "Tal Kasha" },
-    { id: 679, p1: 45, p10: 420, p100: 3900, server: "Tal Kasha" },
-    { id: 7059, p1: 24500, p10: 235000, p100: 2200000, server: "Tal Kasha" },
-    { id: 7060, p1: 48000, p10: 460000, p100: 4400000, server: "Tal Kasha" },
-    { id: 1735, p1: 85, p10: 800, p100: 7500, server: "Tal Kasha" },
-    { id: 311, p1: 110, p10: 1050, p100: 9800, server: "Tal Kasha" },
-    { id: 10842, p1: 185000, p10: 1800000, p100: 0, server: "Tal Kasha" },
-    { id: 2412, p1: 1200, p10: 11500, p100: 110000, server: "Tal Kasha" }
-  ];
-
-  seeds.forEach(s => {
-    processIngestItem({
-      item_id: s.id,
-      item: store.dictionary[s.id]?.name || `Item ${s.id}`,
-      category: store.dictionary[s.id]?.category || "Recurso",
-      precios: { "1": s.p1, "10": s.p10, "100": s.p100 },
-      server: s.server
-    });
-  });
-}
-
-function processIngestItem(payload: IngestPricePayload): MarketPriceData | null {
-  const itemId = Number(payload.item_id || payload.itemId || 0);
-  const rawPrecios = payload.precios || payload.prices || {};
-
-  const p1 = Number(rawPrecios["1"] ?? rawPrecios["1x"] ?? 0);
-  const p10 = Number(rawPrecios["10"] ?? rawPrecios["10x"] ?? 0);
-  const p100 = Number(rawPrecios["100"] ?? rawPrecios["100x"] ?? 0);
-
-  if (!itemId && !payload.item && !payload.itemName) {
-    return null;
-  }
-
-  // Resolver nombre y categoría con el diccionario
-  const dictInfo = itemId ? store.dictionary[itemId] : undefined;
-  const itemName = payload.item || payload.itemName || dictInfo?.name || `Objeto #${itemId}`;
-  const category = payload.category || dictInfo?.category || "Mercadillo General";
-  const serverName = payload.server || payload.server_name || "Servidor Principal";
-
-  const u1 = p1 > 0 ? p1 : 0;
-  const u10 = p10 > 0 ? p10 / 10 : 0;
-  const u100 = p100 > 0 ? p100 / 100 : 0;
-
-  // Determinar mejor opción por unidad
-  const validUnits: Array<{ opt: '1' | '10' | '100'; price: number }> = [];
-  if (u1 > 0) validUnits.push({ opt: '1', price: u1 });
-  if (u10 > 0) validUnits.push({ opt: '10', price: u10 });
-  if (u100 > 0) validUnits.push({ opt: '100', price: u100 });
-
-  let bestUnitOption: '1' | '10' | '100' = '1';
-  let arbitrageSavingPct = 0;
-
-  if (validUnits.length > 0) {
-    validUnits.sort((a, b) => a.price - b.price);
-    bestUnitOption = validUnits[0].opt;
-    const maxUnitPrice = Math.max(...validUnits.map(v => v.price));
-    const minUnitPrice = validUnits[0].price;
-    if (maxUnitPrice > 0 && minUnitPrice < maxUnitPrice) {
-      arbitrageSavingPct = Math.round(((maxUnitPrice - minUnitPrice) / maxUnitPrice) * 100);
-    }
-  }
-
-  const existing = itemId ? store.items.get(itemId) : undefined;
-  const nowStr = new Date().toISOString();
-
-  const history = existing?.history || [];
-  history.push({
-    timestamp: nowStr,
-    price1: p1,
-    price10: p10,
-    price100: p100
-  });
-
-  // Limitar historial a los últimos 30 registros
-  if (history.length > 30) {
-    history.shift();
-  }
-
-  const dataItem: MarketPriceData = {
-    id: `item_${itemId || Math.random().toString(36).substring(2, 9)}`,
-    itemId: itemId || Math.floor(Math.random() * 90000 + 1000),
-    itemName,
-    category,
-    price1: p1,
-    price10: p10,
-    price100: p100,
-    unitPrice1: u1,
-    unitPrice10: u10,
-    unitPrice100: u100,
-    bestUnitOption,
-    arbitrageSavingPct,
-    serverName,
-    updatedAt: nowStr,
-    history,
-    rawPayload: payload as Record<string, unknown>
-  };
-
-  store.items.set(dataItem.itemId, dataItem);
-  return dataItem;
-}
-
-// Initial seed
-seedInitialMarket();
-
-// Lazy Gemini API Client
-let geminiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!geminiClient) {
-    const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      console.warn("Aviso: GEMINI_API_KEY no configurado en entorno.");
-    }
-    geminiClient = new GoogleGenAI({
-      apiKey: key || "dummy_key",
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build'
-        }
-      }
-    });
-  }
-  return geminiClient;
-}
-
-// API Routes
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    uptime: Math.floor((Date.now() - store.stats.serverStartTime) / 1000),
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/api/stats', (req, res) => {
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.get('host') || 'localhost:3000';
-  const fullAppUrl = `${protocol}://${host}`;
-
-  res.json({
-    totalPacketsReceived: store.stats.totalPacketsReceived,
-    totalItemsTracked: store.items.size,
-    activeItemsCount: store.items.size,
-    lastIngestTime: store.stats.lastIngestTime,
-    serverUptimeSeconds: Math.floor((Date.now() - store.stats.serverStartTime) / 1000),
-    apiEndpointUrl: `${fullAppUrl}/api/precios`,
-    dictionarySize: Object.keys(store.dictionary).length,
-    packetLogs: store.packetLogs.slice(0, 20)
-  });
-});
-
-// GET /api/precios
-app.get('/api/precios', (req, res) => {
-  const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : '';
-  const category = typeof req.query.category === 'string' ? req.query.category : '';
-  const server = typeof req.query.server === 'string' ? req.query.server : '';
-
-  let list = Array.from(store.items.values());
-
-  if (search) {
-    list = list.filter(item =>
-      item.itemName.toLowerCase().includes(search) ||
-      String(item.itemId).includes(search)
-    );
-  }
-
-  if (category && category !== 'all') {
-    list = list.filter(item => item.category.toLowerCase().includes(category.toLowerCase()));
-  }
-
-  if (server && server !== 'all') {
-    list = list.filter(item => item.serverName === server);
-  }
-
-  // Ordenar por fecha de actualización descendente
-  list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
-  res.json({
-    count: list.length,
-    total: store.items.size,
-    items: list
-  });
-});
-
-// POST /api/precios (The main receiver endpoint for Python Scapy & clients)
-app.post('/api/precios', (req, res) => {
+// Cargar datos previos de precios_capturados.json si existen
+function loadSavedCaptures() {
   try {
-    const body = req.body;
-    store.stats.totalPacketsReceived += 1;
-    store.stats.totalIngests += 1;
-    store.stats.lastIngestTime = new Date().toISOString();
-
-    const ingestedItems: MarketPriceData[] = [];
-
-    if (Array.isArray(body)) {
-      body.forEach(item => {
-        const processed = processIngestItem(item);
-        if (processed) ingestedItems.push(processed);
-      });
-    } else if (body && Array.isArray(body.items)) {
-      body.items.forEach((item: IngestPricePayload) => {
-        const processed = processIngestItem(item);
-        if (processed) ingestedItems.push(processed);
-      });
-    } else if (body && typeof body === 'object') {
-      const processed = processIngestItem(body);
-      if (processed) ingestedItems.push(processed);
-    }
-
-    // Log packet event
-    store.packetLogs.unshift({
-      id: Math.random().toString(36).substring(2, 9),
-      timestamp: new Date().toLocaleTimeString(),
-      source: req.ip || 'Scapy Sniffer',
-      itemsCount: ingestedItems.length,
-      summary: ingestedItems.map(i => `${i.itemName} (x1:${i.price1})`).join(', ').substring(0, 120),
-      rawPayload: body
-    });
-
-    if (store.packetLogs.length > 50) {
-      store.packetLogs.pop();
-    }
-
-    res.status(200).json({
-      success: true,
-      message: `Procesados ${ingestedItems.length} objetos del mercadillo exitosamente`,
-      ingestedCount: ingestedItems.length,
-      timestamp: store.stats.lastIngestTime,
-      data: ingestedItems
-    });
-  } catch (error: any) {
-    console.error('Error procesando POST /api/precios:', error);
-    res.status(400).json({
-      success: false,
-      error: error?.message || 'Payload inválido'
-    });
-  }
-});
-
-// DELETE /api/precios (Clear / Reset)
-app.delete('/api/precios', (req, res) => {
-  store.items.clear();
-  store.packetLogs = [];
-  res.json({ success: true, message: 'Mercadillo reiniciado' });
-});
-
-// DELETE /api/precios/:id
-app.delete('/api/precios/:id', (req, res) => {
-  const itemId = Number(req.params.id);
-  const deleted = store.items.delete(itemId);
-  res.json({ success: deleted, itemId });
-});
-
-// GET /api/items/dictionary
-app.get('/api/items/dictionary', (req, res) => {
-  res.json(store.dictionary);
-});
-
-// POST /api/items/dictionary (Update dictionary from uploaded id_to_name.json)
-app.post('/api/items/dictionary', (req, res) => {
-  try {
-    const incoming = req.body;
-    let count = 0;
-    if (typeof incoming === 'object' && incoming !== null) {
-      Object.entries(incoming).forEach(([key, val]) => {
-        const id = Number(key);
-        if (!isNaN(id)) {
-          const name = typeof val === 'string' ? val : (val as any).name || `Objeto ${id}`;
-          const category = (typeof val === 'object' && (val as any).category) || 'Importado D2O';
-          store.dictionary[id] = { id, name, category };
-          count++;
-        }
-      });
-    }
-    res.json({ success: true, message: `${count} objetos actualizados en el diccionario` });
-  } catch (e: any) {
-    res.status(400).json({ success: false, error: e.message });
-  }
-});
-
-// Helper to strip Ethernet / IP / TCP headers if a full Wireshark frame was copied
-function extractTcpPayload(buffer: Buffer): { payload: Buffer; strippedHeaders: string; isUnityProtobuf: boolean } {
-  let buf = buffer;
-  let headersInfo = 'Payload TCP directo';
-
-  // Check if starts with Ethernet header (MAC dst [6] + MAC src [6] + EtherType [2] = 14 bytes)
-  // IPv4 EtherType is 0x0800
-  if (buf.length > 54 && buf[12] === 0x08 && buf[13] === 0x00 && (buf[14] >> 4) === 4) {
-    const ipHeaderLen = (buf[14] & 0x0f) * 4;
-    const protocol = buf[23]; // 6 = TCP
-    if (protocol === 6) {
-      const tcpOffset = 14 + ipHeaderLen;
-      if (buf.length > tcpOffset + 12) {
-        const tcpDataOffset = (buf[tcpOffset + 12] >> 4) * 4;
-        const totalHeaderLen = tcpOffset + tcpDataOffset;
-        if (buf.length > totalHeaderLen) {
-          buf = buf.subarray(totalHeaderLen);
-          headersInfo = `Cabecera Ethernet (14B) + IPv4 (${ipHeaderLen}B) + TCP (${tcpDataOffset}B) removidas automáticamente`;
+    if (fs.existsSync(CAPTURED_FILE_PATH)) {
+      const fileData = fs.readFileSync(CAPTURED_FILE_PATH, 'utf-8');
+      if (fileData.trim()) {
+        const parsed = JSON.parse(fileData);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((raw) => {
+            const processed = processIngestItem(raw, false);
+            if (processed) {
+              store.items.set(processed.itemId, processed);
+            }
+          });
+          console.log(`[Store] ${store.items.size} precios cargados desde precios_capturados.json`);
         }
       }
     }
+  } catch (err) {
+    console.error('[Store] Error cargando precios_capturados.json:', err);
   }
+}
 
-  // Check for Protobuf Ankama type signature (ASCII "type.ankama.com/")
-  const str = buf.toString('latin1');
-  const isUnityProtobuf = str.includes('type.ankama.com/');
+// Guardar colección completa en precios_capturados.json
+function persistCapturesToFile() {
+  try {
+    const list: unknown[] = [];
+    store.items.forEach((item) => {
+      if (item.itemType === 'equipable' && item.pricesEquipment) {
+        list.push({
+          item_id: item.itemId,
+          item: item.itemName,
+          type: 'equipable',
+          precios: item.pricesEquipment,
+          precio_medio: item.averagePrice,
+          precio_min: item.minPrice,
+          precio_max: item.maxPrice,
+          mediana: item.medianPrice,
+          server: item.serverName,
+          updated_at: item.updatedAt
+        });
+      } else {
+        list.push({
+          item_id: item.itemId,
+          item: item.itemName,
+          type: 'recurso',
+          precios: {
+            "1": item.pricesResource?.p1 ?? 0,
+            "10": item.pricesResource?.p10 ?? 0,
+            "100": item.pricesResource?.p100 ?? 0,
+            "1000": item.pricesResource?.p1000 ?? 0
+          },
+          precios_unitarios: item.unitPrices,
+          precio_medio_unitario: item.averagePrice,
+          precio_min: item.minPrice,
+          precio_max: item.maxPrice,
+          server: item.serverName,
+          updated_at: item.updatedAt
+        });
+      }
+    });
 
-  return { payload: buf, strippedHeaders: headersInfo, isUnityProtobuf };
+    fs.writeFileSync(CAPTURED_FILE_PATH, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('[Store] Error guardando precios_capturados.json:', err);
+  }
 }
 
 // Protobuf VarInt decoder helper
@@ -371,210 +116,446 @@ function decodeVarInt(buf: Buffer, offset: number): { value: number; bytesRead: 
     result |= (b & 0x7f) << shift;
     if ((b & 0x80) === 0) break;
     shift += 7;
-    if (shift > 35) break; // protect against overflow
+    if (shift > 35) break;
   }
 
   return { value: result, bytesRead };
 }
 
-// Helper to parse Dofus Unity Protobuf Market Price Message (type.ankama.com/kbt)
-function parseUnityMarketProtobuf(buf: Buffer) {
+// Extraer payload TCP de cabeceras completas si vienen de Wireshark/Raw Scapy
+function extractTcpPayload(buf: Buffer): { payload: Buffer; isProtobuf: boolean } {
+  let clean = buf;
+  // Si contiene cabecera ethernet + IP + TCP
+  if (clean.length > 54 && clean[12] === 0x08 && clean[13] === 0x00 && (clean[14] >> 4) === 4) {
+    const ipHeaderLen = (clean[14] & 0x0f) * 4;
+    const protocol = clean[23];
+    if (protocol === 6) {
+      const tcpOffset = 14 + ipHeaderLen;
+      if (clean.length > tcpOffset + 12) {
+        const tcpDataOffset = (clean[tcpOffset + 12] >> 4) * 4;
+        const total = tcpOffset + tcpDataOffset;
+        if (clean.length > total) {
+          clean = clean.subarray(total);
+        }
+      }
+    }
+  }
+
+  const str = clean.toString('latin1');
+  const isProtobuf = str.includes('type.ankama.com/') || str.includes('ankama');
+  return { payload: clean, isProtobuf };
+}
+
+// Parser de Protobuf Dofus Unity (kbt / market price messages)
+function parseProtobufMarketPacket(buf: Buffer): { itemId?: number; prices?: number[]; type?: ItemCategoryType } | null {
   try {
     const str = buf.toString('latin1');
-    const typeIndex = str.indexOf('type.ankama.com/');
-    if (typeIndex === -1) return null;
+    const typeIdx = str.indexOf('type.ankama.com/');
+    let offset = typeIdx !== -1 ? typeIdx : 0;
+    
+    if (typeIdx !== -1) {
+      const endIdx = str.indexOf('\x12', typeIdx);
+      offset = endIdx !== -1 ? endIdx : typeIdx + 20;
+    }
 
-    const nullOrEnd = str.indexOf('\x12', typeIndex);
-    const typeUri = str.substring(typeIndex, nullOrEnd !== -1 ? nullOrEnd : typeIndex + 25);
+    let itemId: number | undefined;
+    const detectedPrices: number[] = [];
 
-    let offset = typeIndex + typeUri.length;
-    let itemId: number | null = null;
-    const prices: number[] = [];
-
-    // Scan for varints and sub-payloads
     while (offset < buf.length) {
-      const tagByte = buf[offset];
+      const tag = buf[offset];
       offset++;
-      const fieldNum = tagByte >> 3;
-      const wireType = tagByte & 7;
+      const field = tag >> 3;
+      const wire = tag & 7;
 
-      if (wireType === 0) { // Varint
+      if (wire === 0) { // Varint
         const { value, bytesRead } = decodeVarInt(buf, offset);
         offset += bytesRead;
-        // In kbt message, Tag 2 is often the Item GID (11118, 11219, etc.)
-        if (fieldNum === 2 && !itemId && value > 0 && value < 100000) {
+        if ((field === 1 || field === 2 || field === 5) && !itemId && value > 0 && value < 200000) {
           itemId = value;
-        } else if (fieldNum === 5 && !itemId && value > 0 && value < 100000) {
-          itemId = value;
+        } else if (value > 0) {
+          detectedPrices.push(value);
         }
-      } else if (wireType === 2) { // Length-delimited
+      } else if (wire === 2) { // Length-delimited sub-message
         const { value: len, bytesRead } = decodeVarInt(buf, offset);
         offset += bytesRead;
-        const subBuf = buf.subarray(offset, offset + len);
+        const sub = buf.subarray(offset, offset + len);
         offset += len;
 
-        // Inspect inside submessage for prices (Tag 32 = field 6 wireType 2 / packed prices or repeated varints)
         let subOff = 0;
-        while (subOff < subBuf.length) {
-          const subTag = subBuf[subOff];
+        while (subOff < sub.length) {
+          const subTag = sub[subOff];
           subOff++;
           const subWire = subTag & 7;
-          const subField = subTag >> 3;
-
           if (subWire === 0) {
-            const { value: varVal, bytesRead: bR } = decodeVarInt(subBuf, subOff);
-            subOff += bR;
-            if (subField === 5 && !itemId) itemId = varVal;
-            if (subField === 2 && !itemId && varVal > 0) itemId = varVal;
+            const { value: subVal, bytesRead: sbR } = decodeVarInt(sub, subOff);
+            subOff += sbR;
+            if (subVal > 0) detectedPrices.push(subVal);
           } else if (subWire === 2) {
-            const { value: pLen, bytesRead: pBR } = decodeVarInt(subBuf, subOff);
-            subOff += pBR;
-            const priceBlock = subBuf.subarray(subOff, subOff + pLen);
-            subOff += pLen;
-
-            // Extract all varints inside price block
-            let pOff = 0;
-            while (pOff < priceBlock.length) {
-              const { value: pVal, bytesRead: pR } = decodeVarInt(priceBlock, pOff);
-              if (pR === 0) break;
-              pOff += pR;
-              if (pVal > 0) prices.push(pVal);
-            }
+            const { value: sLen, bytesRead: sbR2 } = decodeVarInt(sub, subOff);
+            subOff += sbR2 + sLen;
           } else {
-            break;
+            subOff++;
           }
         }
+      } else if (wire === 5) {
+        offset += 4;
+      } else if (wire === 1) {
+        offset += 8;
       } else {
-        offset++;
+        break;
       }
     }
 
-    return {
-      typeUri,
-      itemId,
-      prices
-    };
-  } catch (e) {
+    if (itemId) {
+      return {
+        itemId,
+        prices: detectedPrices,
+        type: detectedPrices.length > 4 ? 'equipable' : 'recurso'
+      };
+    }
+    return null;
+  } catch {
     return null;
   }
 }
 
-// POST /api/packet/analyze (AI Hex Analysis + Local Protobuf Dissector)
-app.post('/api/packet/analyze', async (req, res) => {
+// Procesa e interpreta cualquier JSON recibido (Recursos x1, x10, x100, x1000 o Equipables)
+function processIngestItem(payload: IngestPricePayload, shouldPersist = true): MarketItem | null {
+  let itemId = Number(payload.item_id || payload.itemId || payload.id || 0);
+  let itemName = payload.item || payload.itemName || payload.name;
+  let serverName = payload.server || payload.server_name || 'Draconiros';
+  let incomingType: ItemCategoryType | undefined = (payload.type === 'equipable' || payload.type === 'equipment') ? 'equipable' : undefined;
+
+  let rawPrices = payload.precios || payload.prices;
+  let p1 = Number(payload.p1 ?? 0);
+  let p10 = Number(payload.p10 ?? 0);
+  let p100 = Number(payload.p100 ?? 0);
+  let p1000 = Number(payload.p1000 ?? 0);
+  let equipmentPricesList: number[] = [];
+
+  // Parsear hex de Scapy si viene raw
+  const rawHex = payload.raw_hex || payload.hex;
+  if (rawHex && typeof rawHex === 'string') {
+    const cleanHex = rawHex.replace(/[^0-9a-fA-F]/g, '');
+    if (cleanHex.length >= 4) {
+      const buffer = Buffer.from(cleanHex, 'hex');
+      const { payload: cleanBuf } = extractTcpPayload(buffer);
+      const parsed = parseProtobufMarketPacket(cleanBuf);
+      if (parsed?.itemId) {
+        itemId = itemId || parsed.itemId;
+        if (parsed.prices && parsed.prices.length > 0) {
+          if (parsed.type === 'equipable' || parsed.prices.length > 4) {
+            equipmentPricesList = parsed.prices;
+            incomingType = 'equipable';
+          } else {
+            p1 = p1 || parsed.prices[0] || 0;
+            p10 = p10 || parsed.prices[1] || 0;
+            p100 = p100 || parsed.prices[2] || 0;
+            p1000 = p1000 || parsed.prices[3] || 0;
+          }
+        }
+      }
+    }
+  }
+
+  // Parsear si viene un Array directo de precios (típico de equipables con varias ofertas)
+  if (Array.isArray(rawPrices)) {
+    equipmentPricesList = rawPrices.map(Number).filter(n => !isNaN(n) && n > 0);
+    incomingType = 'equipable';
+  } else if (rawPrices && typeof rawPrices === 'object') {
+    const pRecord = rawPrices as Record<string, number | string>;
+    if (pRecord["1"] !== undefined || pRecord["1x"] !== undefined) p1 = Number(pRecord["1"] ?? pRecord["1x"] ?? 0);
+    if (pRecord["10"] !== undefined || pRecord["10x"] !== undefined) p10 = Number(pRecord["10"] ?? pRecord["10x"] ?? 0);
+    if (pRecord["100"] !== undefined || pRecord["100x"] !== undefined) p100 = Number(pRecord["100"] ?? pRecord["100x"] ?? 0);
+    if (pRecord["1000"] !== undefined || pRecord["1000x"] !== undefined) p1000 = Number(pRecord["1000"] ?? pRecord["1000x"] ?? 0);
+  }
+
+  if (!itemId) {
+    return null;
+  }
+
+  const existing = store.items.get(itemId);
+  const nowStr = new Date().toISOString();
+  const captureCount = (existing?.captureCount || 0) + 1;
+
+  let finalItem: MarketItem;
+
+  // CASO 1: EQUIPABLE (múltiples precios de ofertas individuales)
+  if (incomingType === 'equipable' || equipmentPricesList.length > 0) {
+    const validPrices = equipmentPricesList.filter(p => p > 0);
+    const sorted = [...validPrices].sort((a, b) => a - b);
+    const count = validPrices.length || 1;
+    const sum = validPrices.reduce((acc, curr) => acc + curr, 0);
+    
+    // Cálculo de la Media
+    const averagePrice = count > 0 ? Math.round(sum / count) : 0;
+    const minPrice = sorted.length > 0 ? sorted[0] : 0;
+    const maxPrice = sorted.length > 0 ? sorted[sorted.length - 1] : 0;
+    
+    // Mediana
+    let medianPrice = averagePrice;
+    if (sorted.length > 0) {
+      const mid = Math.floor(sorted.length / 2);
+      medianPrice = sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    }
+
+    const history = existing?.priceHistory || [];
+    history.push({
+      timestamp: nowStr,
+      averagePrice,
+      pricesSummary: `${count} ofertas (Min: ${minPrice.toLocaleString()}, Max: ${maxPrice.toLocaleString()})`
+    });
+    if (history.length > 20) history.shift();
+
+    finalItem = {
+      id: `item_${itemId}`,
+      itemId,
+      itemName: itemName || existing?.itemName || `Equipable #${itemId}`,
+      itemType: 'equipable',
+      serverName,
+      updatedAt: nowStr,
+      captureCount,
+      pricesEquipment: validPrices,
+      averagePrice,
+      minPrice,
+      maxPrice,
+      medianPrice,
+      totalOffers: count,
+      priceHistory: history,
+      rawPayload: payload as unknown
+    };
+  } 
+  // CASO 2: RECURSO (Lotes x1, x10, x100, x1000)
+  else {
+    const u1 = p1 > 0 ? p1 : 0;
+    const u10 = p10 > 0 ? Math.round(p10 / 10) : 0;
+    const u100 = p100 > 0 ? Math.round(p100 / 100) : 0;
+    const u1000 = p1000 > 0 ? Math.round(p1000 / 1000) : 0;
+
+    const availableUnitPrices: number[] = [];
+    if (u1 > 0) availableUnitPrices.push(u1);
+    if (u10 > 0) availableUnitPrices.push(u10);
+    if (u100 > 0) availableUnitPrices.push(u100);
+    if (u1000 > 0) availableUnitPrices.push(u1000);
+
+    // Cálculo de la Media Unitaria entre los lotes disponibles
+    const sumUnit = availableUnitPrices.reduce((acc, curr) => acc + curr, 0);
+    const averagePrice = availableUnitPrices.length > 0 ? Math.round(sumUnit / availableUnitPrices.length) : 0;
+    const minPrice = availableUnitPrices.length > 0 ? Math.min(...availableUnitPrices) : 0;
+    const maxPrice = availableUnitPrices.length > 0 ? Math.max(...availableUnitPrices) : 0;
+
+    const history = existing?.priceHistory || [];
+    history.push({
+      timestamp: nowStr,
+      averagePrice,
+      pricesSummary: `x1:${p1} x10:${p10} x100:${p100} x1000:${p1000}`
+    });
+    if (history.length > 20) history.shift();
+
+    finalItem = {
+      id: `item_${itemId}`,
+      itemId,
+      itemName: itemName || existing?.itemName || `Recurso #${itemId}`,
+      itemType: 'recurso',
+      serverName,
+      updatedAt: nowStr,
+      captureCount,
+      pricesResource: {
+        p1,
+        p10,
+        p100,
+        p1000
+      },
+      unitPrices: {
+        u1,
+        u10,
+        u100,
+        u1000
+      },
+      averagePrice,
+      minPrice,
+      maxPrice,
+      totalOffers: availableUnitPrices.length,
+      priceHistory: history,
+      rawPayload: payload as unknown
+    };
+  }
+
+  store.items.set(itemId, finalItem);
+  store.stats.totalIngests++;
+  store.stats.lastIngestTime = nowStr;
+
+  if (shouldPersist) {
+    persistCapturesToFile();
+  }
+
+  return finalItem;
+}
+
+// Cargar archivo inicial al iniciar servidor
+loadSavedCaptures();
+
+// --- RUTAS API ---
+
+// 1. Health check
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    uptime: Math.floor((Date.now() - store.stats.serverStartTime) / 1000),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 2. Estadísticas generales
+app.get('/api/stats', (req, res) => {
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const host = req.get('host') || 'localhost:3000';
+  const fullAppUrl = `${protocol}://${host}`;
+
+  const stats: ServerStats = {
+    totalPacketsReceived: store.stats.totalPacketsReceived,
+    totalItemsCaptured: store.items.size,
+    lastIngestTime: store.stats.lastIngestTime,
+    serverUptimeSeconds: Math.floor((Date.now() - store.stats.serverStartTime) / 1000),
+    apiEndpointUrl: `${fullAppUrl}/api/precios`,
+    savedFile: 'precios_capturados.json'
+  };
+
+  res.json({
+    ...stats,
+    packetLogs: store.packetLogs.slice(0, 15)
+  });
+});
+
+// 3. GET /api/precios - Obtener lista de precios capturados y sus medias
+app.get('/api/precios', (req, res) => {
+  const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : '';
+  const type = typeof req.query.type === 'string' ? req.query.type : 'all';
+
+  let list = Array.from(store.items.values());
+
+  if (search) {
+    list = list.filter(item =>
+      (item.itemName && item.itemName.toLowerCase().includes(search)) ||
+      String(item.itemId).includes(search)
+    );
+  }
+
+  if (type && type !== 'all') {
+    list = list.filter(item => item.itemType === type);
+  }
+
+  // Ordenar por fecha de última captura descendente
+  list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+  res.json({
+    success: true,
+    total: list.length,
+    items: list
+  });
+});
+
+// 4. POST /api/precios - Receptor JSON para sniffer_scapy.py o peticiones directas
+app.post('/api/precios', (req, res) => {
   try {
-    const { hex, protocolType } = req.body;
+    store.stats.totalPacketsReceived++;
+    const payload = req.body;
+    const ingestedItems: MarketItem[] = [];
 
-    if (!hex || typeof hex !== 'string') {
-      return res.status(400).json({ error: 'Debes proporcionar una cadena hexadecimal.' });
+    if (Array.isArray(payload)) {
+      payload.forEach(entry => {
+        const processed = processIngestItem(entry);
+        if (processed) ingestedItems.push(processed);
+      });
+    } else if (payload && typeof payload === 'object') {
+      const processed = processIngestItem(payload);
+      if (processed) ingestedItems.push(processed);
     }
 
-    const cleanHex = hex.replace(/[^0-9a-fA-F]/g, '');
-    if (cleanHex.length < 4) {
-      return res.status(400).json({ error: 'La cadena hexadecimal es demasiado corta (mínimo 2 bytes = 4 caracteres hex).' });
-    }
+    // Log de actividad
+    const logId = `pkt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const summary = ingestedItems.length > 0 
+      ? `ID: ${ingestedItems.map(i => i.itemId).join(', ')} (${ingestedItems[0].itemType === 'equipable' ? 'Equipable' : 'Recurso'}) • Media: ${ingestedItems[0].averagePrice.toLocaleString()} k`
+      : 'Paquete procesado';
 
-    const initialBuffer = Buffer.from(cleanHex, 'hex');
-    const { payload: rawBytes, strippedHeaders, isUnityProtobuf } = extractTcpPayload(initialBuffer);
+    store.packetLogs.unshift({
+      id: logId,
+      timestamp: new Date().toISOString(),
+      source: req.ip || 'localhost',
+      itemId: ingestedItems[0]?.itemId,
+      summary,
+      payload
+    });
 
-    let msgId = 0;
-    let lenType = 0;
-    let bodyLength = rawBytes.length;
-    let headerLength = 2;
-    let unityParsed = null;
-    let detectedItemName = '';
-
-    if (isUnityProtobuf) {
-      unityParsed = parseUnityMarketProtobuf(rawBytes);
-      if (unityParsed?.itemId) {
-        detectedItemName = store.dictionary[unityParsed.itemId]?.name || `Objeto #${unityParsed.itemId}`;
-      }
-    } else if (rawBytes.length >= 2) {
-      const headerWord = rawBytes.readUInt16BE(0);
-      msgId = headerWord >> 2;
-      lenType = headerWord & 3;
-
-      if (lenType === 0) {
-        bodyLength = 0;
-      } else if (lenType === 1 && rawBytes.length >= 3) {
-        bodyLength = rawBytes.readUInt8(2);
-        headerLength = 3;
-      } else if (lenType === 2 && rawBytes.length >= 4) {
-        bodyLength = rawBytes.readUInt16BE(2);
-        headerLength = 4;
-      } else if (lenType === 3 && rawBytes.length >= 5) {
-        bodyLength = (rawBytes.readUInt8(2) << 16) | rawBytes.readUInt16BE(3);
-        headerLength = 5;
-      }
-    }
-
-    // Try AI generation with Gemini if key is provided, or provide comprehensive local explanation
-    let aiExplanation = '';
-
-    const hasGeminiKey = process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'dummy_key';
-
-    if (hasGeminiKey) {
-      try {
-        const ai = getGeminiClient();
-        const prompt = `Analiza este volcado hexadecimal de red de Dofus (Unity/Protobuf o Dofus 2):
-Hexadecimal Payload: "${rawBytes.toString('hex')}"
-Protocolo: ${isUnityProtobuf ? 'Dofus Unity (Google Protocol Buffers / Ankama URI)' : 'Dofus Clásico (Big-Endian TCP)'}
-${unityParsed ? `Datos detectados: URI=${unityParsed.typeUri}, ItemID=${unityParsed.itemId} (${detectedItemName}), Precios=${JSON.stringify(unityParsed.prices)}` : ''}
-
-Por favor genera:
-1. Diagnóstico de estructura (Cabeceras Ethernet/IP removidas, tipo de paquete detectado, campos clave).
-2. Código Python conciso para Scapy que filtre este mensaje y envíe los datos a la API.`;
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.7-flash',
-          contents: prompt,
-        });
-
-        aiExplanation = response.text || '';
-      } catch (aiErr) {
-        // Fallback to local
-      }
-    }
-
-    if (!aiExplanation) {
-      if (isUnityProtobuf) {
-        aiExplanation = `📦 Protocolo Detectado: Dofus Unity (Google Protocol Buffers)\n` +
-          `• Mensaje URI: ${unityParsed?.typeUri || 'type.ankama.com/kbt'}\n` +
-          `• Item ID decodificado: ${unityParsed?.itemId || 'Detectado'} ${detectedItemName ? `(${detectedItemName})` : ''}\n` +
-          `• Precios brutos encontrados: ${unityParsed?.prices && unityParsed.prices.length > 0 ? unityParsed.prices.join(', ') + ' Kamas' : 'Detectando en payload'}\n` +
-          `• Diagnóstico de Frame: ${strippedHeaders}\n\n` +
-          `💡 En Dofus Unity, Ankama migró el protocolo a Protocol Buffers (google.protobuf.Any). Los mensajes del mercadillo llevan el prefijo 'type.ankama.com/kbt'. Scapy extrae el payload con packet[TCP].payload y con el script en la pestaña 'Scripts Python' puedes enviarlo directamente a la API.`;
-      } else {
-        aiExplanation = `📦 Protocolo Detectado: Dofus Clásico (Big-Endian)\n` +
-          `• Message ID: ${msgId} (0x${msgId.toString(16).toUpperCase()})\n` +
-          `• Length Type: ${lenType} (${lenType} bytes para longitud)\n` +
-          `• Longitud del cuerpo: ${bodyLength} bytes\n` +
-          `• Diagnóstico de Frame: ${strippedHeaders}`;
-      }
+    if (store.packetLogs.length > 50) {
+      store.packetLogs.pop();
     }
 
     res.json({
       success: true,
-      messageId: msgId,
-      lengthType: lenType,
-      payloadLength: bodyLength,
-      rawLength: rawBytes.length,
-      isUnityProtobuf,
-      detectedItem: unityParsed ? {
-        id: unityParsed.itemId,
-        name: detectedItemName,
-        prices: unityParsed.prices
-      } : null,
-      headerHex: rawBytes.subarray(0, Math.min(headerLength, rawBytes.length)).toString('hex'),
-      payloadHex: rawBytes.subarray(headerLength).toString('hex'),
-      strippedHeaders,
-      explanation: aiExplanation
+      message: `Registrados ${ingestedItems.length} objeto(s) y media calculada`,
+      ingestedCount: ingestedItems.length,
+      timestamp: store.stats.lastIngestTime,
+      items: ingestedItems
     });
   } catch (error: any) {
-    console.error('Error analizando paquete:', error);
-    res.status(500).json({ error: error?.message || 'Error analizando paquete' });
+    console.error('[API] Error procesando POST /api/precios:', error);
+    res.status(400).json({
+      success: false,
+      error: error?.message || 'Error procesando payload JSON'
+    });
   }
 });
 
+// 5. DELETE /api/precios - Limpiar colección y reiniciar archivo
+app.delete('/api/precios', (req, res) => {
+  store.items.clear();
+  store.packetLogs = [];
+  store.stats.lastIngestTime = null;
+  persistCapturesToFile();
+  res.json({ success: true, message: 'Precios capturados reiniciados' });
+});
+
+// 6. DELETE /api/precios/:id - Eliminar un item específico
+app.delete('/api/precios/:id', (req, res) => {
+  const itemId = Number(req.params.id);
+  const deleted = store.items.delete(itemId);
+  if (deleted) {
+    persistCapturesToFile();
+  }
+  res.json({ success: deleted, itemId });
+});
+
+// 7. GET /api/precios/export - Exportar archivo JSON
+app.get('/api/precios/export', (req, res) => {
+  try {
+    if (fs.existsSync(CAPTURED_FILE_PATH)) {
+      res.setHeader('Content-Disposition', 'attachment; filename="precios_capturados.json"');
+      res.setHeader('Content-Type', 'application/json');
+      return res.sendFile(CAPTURED_FILE_PATH);
+    }
+    res.json(Array.from(store.items.values()));
+  } catch {
+    res.status(500).json({ error: 'Error exportando archivo' });
+  }
+});
+
+// 8. GET /api/sniffer-script - Obtener código de sniffer_scapy.py para el usuario
+app.get('/api/sniffer-script', (req, res) => {
+  try {
+    const scriptPath = path.join(process.cwd(), 'sniffer_scapy.py');
+    if (fs.existsSync(scriptPath)) {
+      const content = fs.readFileSync(scriptPath, 'utf-8');
+      res.json({ code: content });
+    } else {
+      res.status(404).json({ error: 'Script no encontrado' });
+    }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Integración Vite Middleware / Producción
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -591,7 +572,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Dofus Sniffer Server] Corriendo en http://localhost:${PORT}`);
+    console.log(`[Dofus Market API] Receptor activo en http://localhost:${PORT}/api/precios`);
   });
 }
 

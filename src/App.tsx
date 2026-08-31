@@ -5,19 +5,14 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
-import { MarketplaceFeed } from './components/MarketplaceFeed';
-import { HexInspector } from './components/HexInspector';
-import { PythonScriptsView } from './components/PythonScriptsView';
-import { DictionaryView } from './components/DictionaryView';
-import { ApiSimulator } from './components/ApiSimulator';
-import { MarketPriceData, ServerStats, ItemDictionaryEntry } from './types';
-import { DEFAULT_ITEM_DICTIONARY } from './data/defaultItems';
+import { MarketTable } from './components/MarketTable';
+import { SnifferPanel } from './components/SnifferPanel';
+import { MarketItem, ServerStats } from './types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('feed');
-  const [marketItems, setMarketItems] = useState<MarketPriceData[]>([]);
+  const [activeTab, setActiveTab] = useState<'prices' | 'sniffer'>('prices');
+  const [items, setItems] = useState<MarketItem[]>([]);
   const [stats, setStats] = useState<ServerStats | null>(null);
-  const [dictionary, setDictionary] = useState<Record<number, ItemDictionaryEntry>>(DEFAULT_ITEM_DICTIONARY);
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
   const appUrl = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
@@ -28,10 +23,10 @@ export default function App() {
       const res = await fetch('/api/precios');
       if (res.ok) {
         const data = await res.json();
-        setMarketItems(data.items || []);
+        setItems(data.items || []);
       }
     } catch (err) {
-      console.error('Error fetching market items:', err);
+      console.error('Error cargando precios:', err);
     } finally {
       setIsLoading(false);
     }
@@ -45,61 +40,96 @@ export default function App() {
         setStats(data);
       }
     } catch (err) {
-      console.error('Error fetching server stats:', err);
-    }
-  }, []);
-
-  const fetchDictionary = useCallback(async () => {
-    try {
-      const res = await fetch('/api/items/dictionary');
-      if (res.ok) {
-        const data = await res.json();
-        setDictionary(data);
-      }
-    } catch (err) {
-      console.error('Error fetching dictionary:', err);
+      console.error('Error cargando stats:', err);
     }
   }, []);
 
   useEffect(() => {
     fetchMarketData();
     fetchStats();
-    fetchDictionary();
 
-    // Periodic polling every 4 seconds to catch new incoming packets from Scapy
+    // Sondeo periódico cada 3 segundos para refrescar automáticamente al capturar con Scapy
     const interval = setInterval(() => {
       fetchMarketData();
       fetchStats();
-    }, 4000);
+    }, 3000);
 
     return () => clearInterval(interval);
-  }, [fetchMarketData, fetchStats, fetchDictionary]);
+  }, [fetchMarketData, fetchStats]);
 
   const handleClearMarket = async () => {
+    if (!confirm('¿Estás seguro de que deseas limpiar todos los precios capturados?')) {
+      return;
+    }
     try {
       const res = await fetch('/api/precios', { method: 'DELETE' });
       if (res.ok) {
-        setMarketItems([]);
+        setItems([]);
         fetchStats();
       }
     } catch (err) {
-      console.error('Error clearing market:', err);
+      console.error('Error limpiando precios:', err);
     }
   };
 
-  const handleUpdateDictionary = async (newEntries: Record<string, any>) => {
+  const handleDeleteItem = async (itemId: number) => {
     try {
-      const res = await fetch('/api/items/dictionary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newEntries)
-      });
+      const res = await fetch(`/api/precios/${itemId}`, { method: 'DELETE' });
       if (res.ok) {
-        fetchDictionary();
+        setItems(prev => prev.filter(i => i.itemId !== itemId));
+        fetchStats();
       }
     } catch (err) {
-      console.error('Error updating dictionary:', err);
+      console.error('Error eliminando item:', err);
     }
+  };
+
+  const handleExportJson = () => {
+    window.location.href = '/api/precios/export';
+  };
+
+  const handleSendCustomPayload = async (payload: any): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/precios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        await fetchMarketData();
+        await fetchStats();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Error enviando payload custom:', err);
+      return false;
+    }
+  };
+
+  const handleSendQuickTest = async () => {
+    const sampleResource = {
+      item_id: 11219,
+      item: "Cola de Jalamut Real",
+      type: "recurso",
+      precios: {
+        "1": 18,
+        "10": 50,
+        "100": 450,
+        "1000": 4200
+      },
+      server: "Draconiros"
+    };
+
+    const sampleEquipment = {
+      item_id: 8421,
+      item: "Gelano",
+      type: "equipable",
+      precios: [150000, 155000, 160000, 175000, 190000],
+      server: "Draconiros"
+    };
+
+    await handleSendCustomPayload([sampleResource, sampleEquipment]);
   };
 
   return (
@@ -108,57 +138,34 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         stats={stats}
-        appUrl={appUrl}
+        itemsCount={items.length}
+        onClear={handleClearMarket}
+        onExport={handleExportJson}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {activeTab === 'feed' && (
-          <MarketplaceFeed
-            items={marketItems}
+        {activeTab === 'prices' ? (
+          <MarketTable
+            items={items}
+            onDeleteItem={handleDeleteItem}
             onRefresh={fetchMarketData}
-            onClear={handleClearMarket}
+            onSendQuickTest={handleSendQuickTest}
             isLoading={isLoading}
           />
-        )}
-
-        {activeTab === 'hex' && (
-          <HexInspector
-            onInjectDecodedItems={() => {
-              fetchMarketData();
-              fetchStats();
-            }}
-          />
-        )}
-
-        {activeTab === 'scripts' && (
-          <PythonScriptsView appUrl={appUrl} />
-        )}
-
-        {activeTab === 'dictionary' && (
-          <DictionaryView
-            dictionary={dictionary}
-            onUpdateDictionary={handleUpdateDictionary}
-            onRefresh={fetchDictionary}
-          />
-        )}
-
-        {activeTab === 'simulator' && (
-          <ApiSimulator
-            dictionary={dictionary}
-            onItemIngested={() => {
-              fetchMarketData();
-              fetchStats();
-            }}
+        ) : (
+          <SnifferPanel
+            packetLogs={(stats as any)?.packetLogs || []}
             appUrl={appUrl}
+            onSendCustomPayload={handleSendCustomPayload}
           />
         )}
       </main>
 
       <footer className="border-t border-slate-900 bg-slate-950/80 py-4 text-center text-xs text-slate-500">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>Dofus Market Sniffer & Protocol Studio • Python 3 & Scapy Companion Hub</span>
+          <span>Dofus Market Sniffer • Receptor JSON y Captura Pasiva Scapy</span>
           <span className="font-mono text-[11px] text-slate-600">
-            Receptor REST: POST /api/precios • Filtro BPF: tcp port 5555
+            Receptor REST: POST http://localhost:3000/api/precios • Filtro: tcp port 5555
           </span>
         </div>
       </footer>

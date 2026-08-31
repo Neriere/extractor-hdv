@@ -1,112 +1,118 @@
-import React, { useState } from 'react';
-import { Radio, Copy, Check, Terminal, Database, Activity, Code2, PlayCircle, ShieldCheck } from 'lucide-react';
+import React from 'react';
+import { Activity, Radio, Download, Trash2, ShieldCheck, Terminal, Layers } from 'lucide-react';
 import { ServerStats } from '../types';
 
 interface NavbarProps {
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
+  activeTab: 'prices' | 'sniffer';
+  setActiveTab: (tab: 'prices' | 'sniffer') => void;
   stats: ServerStats | null;
-  appUrl: string;
+  itemsCount: number;
+  onClear: () => void;
+  onExport: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab, stats, appUrl }) => {
-  const [copied, setCopied] = useState(false);
-
-  const fullApiUrl = stats?.apiEndpointUrl || `${appUrl}/api/precios`;
-
-  const copyApiUrl = () => {
-    navigator.clipboard.writeText(fullApiUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const navItems = [
-    { id: 'feed', label: 'Mercadillo en Vivo', icon: Activity, badge: stats?.activeItemsCount },
-    { id: 'hex', label: 'Inspector Hex & Protocolo', icon: Terminal },
-    { id: 'scripts', label: 'Scripts Python & Scapy', icon: Code2 },
-    { id: 'dictionary', label: 'Diccionario D2O / D2I', icon: Database },
-    { id: 'simulator', label: 'Simulador de Envíos', icon: PlayCircle }
-  ];
-
+export const Navbar: React.FC<NavbarProps> = ({
+  activeTab,
+  setActiveTab,
+  stats,
+  itemsCount,
+  onClear,
+  onExport,
+}) => {
   return (
-    <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-40">
-      {/* Top Banner / Status Bar */}
+    <header className="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex flex-col md:flex-row items-center justify-between py-3 gap-3 border-b border-slate-800/60">
-          <div className="flex items-center space-x-3">
-            <div className="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-mono font-bold shadow-sm">
-              <Radio className="w-5 h-5 animate-pulse" />
+        <div className="flex items-center justify-between h-16 gap-4">
+          
+          {/* Logo & Title */}
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-amber-500 to-emerald-400 p-0.5 shadow-lg shadow-emerald-500/10">
+              <div className="w-full h-full bg-slate-950 rounded-[10px] flex items-center justify-center">
+                <Radio className="w-5 h-5 text-emerald-400 animate-pulse" />
+              </div>
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-slate-100 tracking-tight">Dofus Market Sniffer Hub</h1>
-                <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  API Activa
+                <h1 className="text-base sm:text-lg font-bold text-slate-100 tracking-tight">
+                  Dofus Market Sniffer
+                </h1>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-emerald-950/80 text-emerald-300 border border-emerald-800/60">
+                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                  Pasivo (Scapy)
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-normal">Receptor de paquetes Scapy, deserializador binario y base de datos de precios</p>
+              <p className="text-xs text-slate-400 hidden sm:block">
+                Receptor JSON • Recursos x1/x10/x100/x1000 & Equipables con Precio Medio
+              </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
-            <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-300 gap-2 max-w-full overflow-hidden">
-              <span className="text-slate-500 font-sans font-medium">Endpoint:</span>
-              <code className="text-amber-300 truncate max-w-[240px] sm:max-w-xs">{fullApiUrl}</code>
-              <button
-                id="copy-api-url-btn"
-                onClick={copyApiUrl}
-                title="Copiar URL para el script de Python"
-                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white transition-colors"
-              >
-                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              </button>
-            </div>
+          {/* Navigation Tabs */}
+          <nav className="flex items-center gap-1.5 p-1 bg-slate-900/90 rounded-lg border border-slate-800">
+            <button
+              id="tab-prices"
+              onClick={() => setActiveTab('prices')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                activeTab === 'prices'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Precios Capturados
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                activeTab === 'prices' ? 'bg-emerald-800 text-emerald-100' : 'bg-slate-800 text-slate-300'
+              }`}>
+                {itemsCount}
+              </span>
+            </button>
 
-            <div className="hidden sm:flex items-center gap-3 bg-slate-950/60 border border-slate-800/80 rounded-lg px-3 py-1.5 text-xs">
-              <div className="flex items-center gap-1.5 text-slate-300">
-                <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="text-slate-400">Paquetes:</span>
-                <span className="font-semibold text-slate-200 font-mono">{stats?.totalPacketsReceived || 0}</span>
-              </div>
-              <span className="text-slate-700">|</span>
-              <div className="flex items-center gap-1.5 text-slate-300">
-                <span className="text-slate-400">Objetos:</span>
-                <span className="font-semibold text-slate-200 font-mono">{stats?.activeItemsCount || 0}</span>
-              </div>
-            </div>
+            <button
+              id="tab-sniffer"
+              onClick={() => setActiveTab('sniffer')}
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                activeTab === 'sniffer'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5" />
+              Sniffer Scapy & API
+              {stats?.lastIngestTime && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+              )}
+            </button>
+          </nav>
+
+          {/* Actions */}
+          <div className="flex items-center gap-2">
+            <button
+              id="btn-export-json"
+              onClick={onExport}
+              title="Descargar precios_capturados.json"
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5 text-slate-400" />
+              Exportar JSON
+            </button>
+
+            <button
+              id="btn-clear-market"
+              onClick={onClear}
+              disabled={itemsCount === 0}
+              title="Limpiar todos los precios guardados"
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                itemsCount > 0
+                  ? 'bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/50'
+                  : 'bg-slate-900/40 text-slate-600 border border-slate-800/40 cursor-not-allowed'
+              }`}
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span className="hidden md:inline">Limpiar</span>
+            </button>
           </div>
+
         </div>
-
-        {/* Navigation Tabs */}
-        <nav className="flex space-x-1 sm:space-x-2 overflow-x-auto py-2 scrollbar-none" aria-label="Tabs">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                id={`tab-btn-${item.id}`}
-                onClick={() => setActiveTab(item.id)}
-                className={`flex items-center gap-2 px-3 py-2 text-xs sm:text-sm font-medium rounded-lg whitespace-nowrap transition-all ${
-                  isActive
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? 'text-emerald-400' : 'text-slate-400'}`} />
-                <span>{item.label}</span>
-                {item.badge !== undefined && item.badge > 0 && (
-                  <span className={`px-1.5 py-0.2 text-xs rounded-full font-mono ${
-                    isActive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
-                  }`}>
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
       </div>
     </header>
   );

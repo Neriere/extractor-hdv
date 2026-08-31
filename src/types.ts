@@ -1,84 +1,88 @@
-export interface MarketPriceData {
-  id: string;
+export type ItemCategoryType = 'recurso' | 'equipable';
+
+export interface MarketItem {
+  id: string; // internal unique key (e.g. "item_11219" or "item_65")
   itemId: number;
-  itemName: string;
-  category: string;
-  price1: number;
-  price10: number;
-  price100: number;
-  unitPrice1: number;
-  unitPrice10: number;
-  unitPrice100: number;
-  bestUnitOption: '1' | '10' | '100';
-  arbitrageSavingPct: number;
-  serverName?: string;
+  itemName?: string;
+  itemType: ItemCategoryType;
+  serverName: string;
   updatedAt: string;
-  history?: Array<{
+  captureCount: number;
+
+  // Recursos (x1, x10, x100, x1000)
+  pricesResource?: {
+    p1: number;
+    p10: number;
+    p100: number;
+    p1000: number;
+  };
+  unitPrices?: {
+    u1: number;
+    u10: number;
+    u100: number;
+    u1000: number;
+  };
+
+  // Equipables (Lista de precios detectados)
+  pricesEquipment?: number[];
+
+  // Métricas estadísticas calculadas en cualquier situación
+  averagePrice: number;       // Precio Medio (Media unitaria en recursos o media de ofertas en equipables)
+  minPrice: number;           // Precio mínimo (unitario en recurso, o mínima oferta en equipable)
+  maxPrice: number;           // Precio máximo (unitario en recurso, o máxima oferta en equipable)
+  medianPrice?: number;       // Mediana
+  totalOffers: number;        // Cantidad de ofertas o lotes registrados
+  
+  // Historial de cambios
+  priceHistory?: Array<{
     timestamp: string;
-    price1: number;
-    price10: number;
-    price100: number;
+    averagePrice: number;
+    pricesSummary: string;
   }>;
-  rawPayload?: Record<string, unknown>;
+
+  rawPayload?: unknown;
 }
 
 export interface IngestPricePayload {
+  item_id?: number | string;
+  itemId?: number | string;
+  id?: number | string;
   item?: string;
-  item_id?: number;
-  itemId?: number;
   itemName?: string;
-  category?: string;
-  precios?: {
-    "1"?: number;
-    "10"?: number;
-    "100"?: number;
-    "1x"?: number;
-    "10x"?: number;
-    "100x"?: number;
-  };
-  prices?: {
-    "1"?: number;
-    "10"?: number;
-    "100"?: number;
-  };
+  name?: string;
+  type?: 'recurso' | 'resource' | 'equipable' | 'equipment';
+  
+  // Para recursos: {"1": 18, "10": 5, "100": 8, "1000": 65} o similar
+  precios?: Record<string, number | string> | number[];
+  prices?: Record<string, number | string> | number[];
+  
+  // O campos planos
+  p1?: number;
+  p10?: number;
+  p100?: number;
+  p1000?: number;
+
   server?: string;
   server_name?: string;
   timestamp?: string;
+  raw_hex?: string;
+  hex?: string;
 }
 
-export interface ItemDictionaryEntry {
-  id: number;
-  name: string;
-  category: string;
-  level?: number;
-  iconId?: number;
-  description?: string;
-}
-
-export interface PacketAnalysisResult {
-  messageId: number;
-  messageName: string;
-  lengthType: number;
-  payloadLength: number;
-  rawLength: number;
-  headerHex: string;
-  payloadHex: string;
-  decodedItems?: Array<{
-    itemId: number;
-    itemName: string;
-    price1: number;
-    price10: number;
-    price100: number;
-  }>;
-  explanation: string;
-  pythonSnippet: string;
+export interface PacketLogEntry {
+  id: string;
+  timestamp: string;
+  source: string;
+  itemId?: number;
+  summary: string;
+  payload: unknown;
 }
 
 export interface ServerStats {
   totalPacketsReceived: number;
-  totalItemsTracked: number;
-  activeItemsCount: number;
+  totalItemsCaptured: number;
   lastIngestTime: string | null;
   serverUptimeSeconds: number;
   apiEndpointUrl: string;
+  savedFile: string;
 }
