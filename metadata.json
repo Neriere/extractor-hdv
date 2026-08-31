@@ -1,0 +1,6 @@
+{
+  "name": "Dofus Market Sniffer & Protocol Studio",
+  "description": "Herramienta complementaria para captura e inspección de paquetes de red con Scapy, análisis hexadecimal con IA, mapeo D2O/D2I y receptor API de precios de mercadillo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
